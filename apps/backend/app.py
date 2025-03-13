@@ -1,132 +1,214 @@
-import os
-from flask import Flask, request, jsonify, Response
-from slack_sdk import WebClient
-from kafka import KafkaProducer, KafkaConsumer
-from datetime import datetime, timedelta
-from flask_cors import CORS
-import schedule
-import time
-import threading
-import json
-from collections import defaultdict
+import os  # let us do path/file stuff
+import time  # for sleep and timing
+import json  # we handle JSON for data
+import threading  # for background threads
+import schedule  # for scheduling repeated tasks
+import requests  # so we can call MTA endpoints
+import csv  # parse CSV for station data
+import uuid  # generate unique IDs for consumer group
+from flask import Flask, Response, jsonify  # basic Flask web methods
+from flask_cors import CORS  # handle cross-origin requests
+from kafka import KafkaProducer, KafkaConsumer  # produce/consume from Redpanda
+from datetime import datetime, timezone  # for timestamps in UTC
+from google.transit import gtfs_realtime_pb2  # parse GTFS-RT protobuf
 
-app = Flask(__name__) #creates main Flask application
-CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}) #Configures app to allow browser requests on local host
+app = Flask(__name__)  # create the Flask app instance
+CORS(app, resources={r"/*": {"origins": "*"}})  # allow CORS for all routes
 
-# Replace below with your actual Slack Credentials:
-# ------------------------------------------------
-SLACK_SIGNING_SECRET = "YOUR_SIGNING_SECRET"
-SLACK_BOT_TOKEN = "YOUR_BOT_TOKEN"
-BOOTSTRAP_SERVERS = 'localhost:9092'  # Redpanda server location
-TOPIC_NAME = 'slack-events' #Redpanda topic that we will send Slack event data to
-
-# Global
-# ----------------------------------------------
-producer = KafkaProducer(bootstrap_servers=BOOTSTRAP_SERVERS) #creates a connection to Redpanda
-monthly_messages = 0  # Tracks messages in 30 day period
-active_members = 0  #Tracks new members over a 30 day period
-last_reset = datetime.now()  # Holds date and time of last 30 day reset period
-message_counts = defaultdict(int)  #dictionary that starts every individual user's message count at 0. Stores USER ID and # messages for each user
+# REDPANDA / KAFKA CONFIG
+BOOTSTRAP_SERVERS = "localhost:9092"   # this is our Redpanda broker
+TOPIC_NAME = "mta-feed"  # we'll produce/consume from this single topic
 
 
-# Function that reorganizes raw Slack data (JSON) and stores it in a more convenient way
-#----------------------------------------------------------
-def transform_event(event):
-    
-    event_type = event.get("type", "unknown") #Reads Slack event type (message vs join)
+# MTA FEEDS: All 8 endpoints for full coverage
+MTA_FEEDS = [
+    # 1) Lines A, C, E, SR
+    "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-ace",
+    # 2) G
+    "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-g",
+    # 3) N, Q, R, W
+    "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-nqrw",
+    # 4) B, D, F, M, SF
+    "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-bdfm",
+    # 5) J, Z
+    "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-jz",
+    # 6) L
+    "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-l",
+    # 7) SIR
+    "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-si",
+    # 8) Lines 1,2,3,4,5,6,7,S are the default feed:
+    "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs"
+]
 
-    if event_type == "team_join":
-        user = event.get("user", {}).get("id", "unknown") #Function to label user with userID or unknown if not available
-    else:
-        user = event.get("user", "unknown")
 
-    return {
-        "event_type": event_type,
-        "user": user,
-        "channel": event.get("channel", "unknown"),
-        "text": event.get("text", ""),
-        "timestamp": event.get("event_ts", datetime.now().timestamp()),
-        "metric_type": (
-            "message_count" if event_type == "message" else
-            "channel_count" if event_type == "channel_created" else
-            "member_count" if event_type == "team_join" else
-            "unknown"
-        ) #returns a dictionary containing notable event data (formating the data)
-    }
+# HEADERS: If you need an API key, add it here
+HEADERS = {
+    # "x-api-key": "YOUR_API_KEY_HERE"  # can fill in if required
+}
 
-@app.route('/slack-events', methods=['POST']) #defines a web address that slack hits with new data
-def slack_events():
-    
-    global monthly_messages, active_members #preparing to change these variables
+FETCH_INTERVAL_SECONDS = 5  # how often we poll MTA feeds
 
-    data = request.json # Slack URL verification handshake
-    if data.get("type") == "url_verification":
-        return jsonify({"challenge": data["challenge"]})
+producer = KafkaProducer(
+    bootstrap_servers=BOOTSTRAP_SERVERS,  # point to Redpanda
+    value_serializer=lambda v: json.dumps(v).encode("utf-8")  # turn dict to JSON bytes
+)
 
-    # Getting the event key from Slack's JSON event
-    raw_event = data.get("event", {})
-    transformed = transform_event(raw_event) #transforms the raw slack event to our own version of an event via the above transform function
+last_fetched_trips = []  # store the last batch of trips we got
 
-    # Updating counters
-    if transformed["metric_type"] == "message_count":
-        monthly_messages += 1
-        message_counts[transformed["user"]] += 1
-    elif transformed["metric_type"] == "member_count":
-        active_members += 1
+# (Optional) station data
+station_data = {}  # we can fill this with station lat/lon
 
-    # Sending transformed event to Redpanda's slack-events topic. First, the Python dictionary event is converted to JSON string and then to bytes.
-    producer.send(TOPIC_NAME, value=json.dumps(transformed).encode('utf-8'))
+def load_station_data():
+    """
+    If you have a 'stations.csv' with columns:
+       stop_id, stop_name, stop_lat, stop_lon
+    we load it for station lookups.
+    """
+    csv_path = os.path.join(os.path.dirname(__file__), "stations.csv")  # figure out full path
+    if not os.path.exists(csv_path):  # if no CSV, just warn
+        print("[WARN] stations.csv not found, skipping station data load.")
+        return
+    count = 0  # track how many stations we read
+    with open(csv_path, "r", encoding="utf-8") as f:  # open CSV
+        reader = csv.DictReader(f)  # read it as dicts
+        for row in reader:  # loop each station row
+            sid = row["stop_id"].strip()  # the station ID
+            station_data[sid] = {
+                "name": row["stop_name"],
+                "lat": float(row["stop_lat"]),
+                "lon": float(row["stop_lon"])
+            }
+            count += 1  # increment station count
+    print(f"[INFO] Loaded {count} stations from {csv_path}")  # done loading
 
-    return jsonify({"status": "success"}), 200 #telling Slack the event was received and there were no problems.
 
-@app.route('/metrics', methods=['GET']) #A separate app route that allows the frontend to check the metric totals and reset time
-def get_metrics():
-    
-    return jsonify({
-        "monthly_messages": monthly_messages,
-        "active_members": active_members,
-        "last_reset": last_reset.isoformat()
-    })
+# PARSE DIRECTION FROM TRIP ID
+def parse_direction(trip_id: str):
+    """
+    If trip_id includes '..N', say Northbound,
+    If '..S', say Southbound,
+    else None.
+    """
+    if "..N" in trip_id:  # if it has ..N
+        return "Northbound"  # say north
+    elif "..S" in trip_id:  # if ..S
+        return "Southbound"  # say south
+    return None  # else no direction
 
-@app.route('/leaderboard', methods=['GET']) #Another endpoint for the frontend to get top contributors
-def get_leaderboard():
-    
-    sorted_users = sorted(message_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-    return jsonify({"leaderboard": dict(sorted_users)})
 
-@app.route('/slack-events-stream') #Defines SSE endpoint to consume from Redpandaaand stream to frontend
-def slack_events_stream():
-    
-    def generate_events(): #read from RedPanda)
+# ROUTE VALIDATION: We accept all MTA lines here
+VALID_ROUTES = {
+    "1","2","3","4","5","6","6X","7","7X","S","GS",
+    "A","C","E","SR","G","N","Q","R","W","B","D","F","M","SF","J","Z","L","SI"
+}
+
+
+# MAIN FETCH LOGIC: For each of the 8 feeds
+def fetch_all_feeds():
+    global last_fetched_trips  # so we can store them in that global
+    all_trips = []  # accumulate everything from all feeds
+
+    for feed_url in MTA_FEEDS:  # loop over each feed
+        try:
+            resp = requests.get(feed_url, headers=HEADERS, timeout=10)  # call MTA feed
+            if resp.status_code != 200:  # if not success
+                print(f"[ERROR] Feed {feed_url} returned {resp.status_code}")
+                continue
+
+            raw = resp.content  # get raw bytes
+            feed = gtfs_realtime_pb2.FeedMessage()  # create a FeedMessage object
+            feed.ParseFromString(raw)  # parse the protobuf from raw bytes
+
+            for entity in feed.entity:  # loop each entity in the feed
+                if not entity.trip_update and not entity.vehicle:
+                    continue  # skip if no trip_update or vehicle data
+
+                trip_id = ""
+                route_id = ""
+                current_stop_id = ""
+                next_stop_id = ""   # We no longer parse upcoming stops
+
+                if entity.trip_update:  # if there's trip_update info
+                    trip_id = entity.trip_update.trip.trip_id
+                    route_id = entity.trip_update.trip.route_id
+
+                if entity.vehicle:  # if there's vehicle data
+                    veh = entity.vehicle
+                    if not trip_id:
+                        trip_id = veh.trip.trip_id
+                    if not route_id:
+                        route_id = veh.trip.route_id
+                    if veh.stop_id:
+                        current_stop_id = veh.stop_id
+
+                if not route_id:
+                    continue  # skip if no route
+
+                # Filter only if route is recognized
+                if route_id not in VALID_ROUTES:
+                    continue
+
+                direction = parse_direction(trip_id)  # figure out N or S
+
+                rec = {
+                    "trip_id": trip_id,
+                    "route_id": route_id,
+                    "current_stop_id": current_stop_id,
+                    "next_stop_id": next_stop_id,  # remains empty
+                    "direction": direction,
+                    "timestamp": int(datetime.now(timezone.utc).timestamp())
+                }
+                all_trips.append(rec)  # store that in our big list
+        except Exception as e:  # handle exceptions
+            print(f"[ERROR] Could not fetch/parse feed {feed_url}: {e}")
+            continue
+
+    # Produce everything to Redpanda
+    for td in all_trips:
+        producer.send(TOPIC_NAME, value=td)  # send each rec to the topic
+    producer.flush()  # make sure they get delivered
+
+    last_fetched_trips = all_trips  # store in global
+    print(f"[INFO] Produced {len(all_trips)} trip updates total at {datetime.now()}")  # log
+
+def schedule_fetch():
+    schedule.every(FETCH_INTERVAL_SECONDS).seconds.do(fetch_all_feeds)  # run fetch_all_feeds every 5s
+    while True:
+        schedule.run_pending()  # do scheduled tasks
+        time.sleep(1)  # short sleep
+
+
+# FLASK ROUTES
+@app.route("/latest-trips")
+def latest_trips():
+    return jsonify(last_fetched_trips), 200  # return the last fetched trips as JSON
+
+@app.route("/stations")
+def get_stations():
+    return jsonify(station_data), 200  # serve up station data as JSON if loaded
+
+@app.route("/train-stream")
+def train_stream():
+    """
+    SSE endpoint that consumes from the single 'mta-feed' topic
+    in Redpanda, with random group_id, so each new connection
+    sees new data.
+    """
+    def event_stream():
         consumer = KafkaConsumer(
             TOPIC_NAME,
             bootstrap_servers=BOOTSTRAP_SERVERS,
-            auto_offset_reset='earliest', #if no saved position, start from beginning of topic
-            enable_auto_commit=False #Read continuously
+            auto_offset_reset="latest",
+            enable_auto_commit=False,
+            group_id=f"mta-group-{uuid.uuid4()}",
+            value_deserializer=lambda m: json.loads(m.decode("utf-8"))
         )
-        for message in consumer: #Take bytes of consumed message, turn into string, and parse JSON.
-            try:
-                event_data = json.loads(message.value.decode('utf-8')) #SSE format requires "data: ..." and then a blank line
-                yield f"data: {json.dumps(event_data)}\n\n" #yield means send data continuously wihtout ending response
-            except Exception as err:
-                print(f"Error streaming event: {err}")
-    return Response(generate_events(), mimetype="text/event-stream") #Send ongoing stream to frontend
+        for msg in consumer:  # forever read messages
+            yield f"data: {json.dumps(msg.value)}\n\n"  # SSE format
 
-def reset_counters(): #reset the monthly metrics every 30 days
-   
-    global monthly_messages, active_members, message_counts, last_reset
-    monthly_messages = 0
-    active_members = 0
-    message_counts = defaultdict(int)
-    last_reset = datetime.now()
+    return Response(event_stream(), mimetype="text/event-stream")  # return SSE response
 
-def scheduler(): #scheduler that runs reset_counters() every 30 days
-    
-    schedule.every(30).days.do(reset_counters)
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
-
-if __name__ == '__main__':
-    threading.Thread(target=scheduler, daemon=True).start()
-    app.run(port=8000, debug=True) #run the app
+if __name__ == "__main__":
+    load_station_data()  # load stations if CSV is present
+    threading.Thread(target=schedule_fetch, daemon=True).start()  # start the scheduler in a background thread
+    app.run(port=8000, debug=True)  # run Flask on port 8000, with debug
