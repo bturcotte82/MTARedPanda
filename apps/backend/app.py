@@ -1,26 +1,30 @@
-import os  # let us do path/file stuff
-import time  # for sleep and timing
-import json  # we handle JSON for data
-import threading  # for background threads
-import schedule  # for scheduling repeated tasks
-import requests  # so we can call MTA endpoints
-import csv  # parse CSV for station data
-import uuid  # generate unique IDs for consumer group
-from flask import Flask, Response, jsonify  # basic Flask web methods
-from flask_cors import CORS  # handle cross-origin requests
-from kafka import KafkaProducer, KafkaConsumer  # produce/consume from Redpanda
-from datetime import datetime, timezone  # for timestamps in UTC
-from google.transit import gtfs_realtime_pb2  # parse GTFS-RT protobuf
+import os
+import time
+import json
+import threading
+import schedule
+import requests
+import csv
+import uuid
 
-app = Flask(__name__)  # create the Flask app instance
-CORS(app, resources={r"/*": {"origins": "*"}})  # allow CORS for all routes
+from flask import Flask, Response, jsonify
+from flask_cors import CORS
+from kafka import KafkaProducer, KafkaConsumer
+from datetime import datetime, timezone
+from google.transit import gtfs_realtime_pb2
 
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+################################################
 # REDPANDA / KAFKA CONFIG
-BOOTSTRAP_SERVERS = "localhost:9092"   # this is our Redpanda broker
-TOPIC_NAME = "mta-feed"  # we'll produce/consume from this single topic
+################################################
+BOOTSTRAP_SERVERS = "cv7j8ci9anc1h5oh9sa0.any.us-east-1.mpx.prd.cloud.redpanda.com:9092" 
+TOPIC_NAME = "mta-feed"
 
-
+################################################
 # MTA FEEDS: All 8 endpoints for full coverage
+################################################
 MTA_FEEDS = [
     # 1) Lines A, C, E, SR
     "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-ace",
@@ -40,23 +44,29 @@ MTA_FEEDS = [
     "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs"
 ]
 
-
+################################################
 # HEADERS: If you need an API key, add it here
+################################################
 HEADERS = {
-    # "x-api-key": "YOUR_API_KEY_HERE"  # can fill in if required
+    # "x-api-key": "YOUR_API_KEY_HERE"
 }
 
-FETCH_INTERVAL_SECONDS = 5  # how often we poll MTA feeds
+FETCH_INTERVAL_SECONDS = 5
 
+# Create the Kafka producer with SASL_SSL & SCRAM-SHA-256
 producer = KafkaProducer(
-    bootstrap_servers=BOOTSTRAP_SERVERS,  # point to Redpanda
-    value_serializer=lambda v: json.dumps(v).encode("utf-8")  # turn dict to JSON bytes
+    bootstrap_servers=BOOTSTRAP_SERVERS,
+    security_protocol="SASL_SSL",
+    sasl_mechanism="SCRAM-SHA-256",
+    sasl_plain_username="bturcotte",
+    sasl_plain_password="9989",
+    value_serializer=lambda v: json.dumps(v).encode("utf-8")
 )
 
-last_fetched_trips = []  # store the last batch of trips we got
+last_fetched_trips = []
 
 # (Optional) station data
-station_data = {}  # we can fill this with station lat/lon
+station_data = {}
 
 def load_station_data():
     """
@@ -64,75 +74,78 @@ def load_station_data():
        stop_id, stop_name, stop_lat, stop_lon
     we load it for station lookups.
     """
-    csv_path = os.path.join(os.path.dirname(__file__), "stations.csv")  # figure out full path
-    if not os.path.exists(csv_path):  # if no CSV, just warn
+    csv_path = os.path.join(os.path.dirname(__file__), "stations.csv")
+    if not os.path.exists(csv_path):
         print("[WARN] stations.csv not found, skipping station data load.")
         return
-    count = 0  # track how many stations we read
-    with open(csv_path, "r", encoding="utf-8") as f:  # open CSV
-        reader = csv.DictReader(f)  # read it as dicts
-        for row in reader:  # loop each station row
-            sid = row["stop_id"].strip()  # the station ID
+    count = 0
+    with open(csv_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            sid = row["stop_id"].strip()
             station_data[sid] = {
                 "name": row["stop_name"],
                 "lat": float(row["stop_lat"]),
                 "lon": float(row["stop_lon"])
             }
-            count += 1  # increment station count
-    print(f"[INFO] Loaded {count} stations from {csv_path}")  # done loading
+            count += 1
+    print(f"[INFO] Loaded {count} stations from {csv_path}")
 
-
+################################################
 # PARSE DIRECTION FROM TRIP ID
+################################################
 def parse_direction(trip_id: str):
     """
     If trip_id includes '..N', say Northbound,
     If '..S', say Southbound,
     else None.
     """
-    if "..N" in trip_id:  # if it has ..N
-        return "Northbound"  # say north
-    elif "..S" in trip_id:  # if ..S
-        return "Southbound"  # say south
-    return None  # else no direction
+    if "..N" in trip_id:
+        return "Northbound"
+    elif "..S" in trip_id:
+        return "Southbound"
+    return None
 
-
+################################################
 # ROUTE VALIDATION: We accept all MTA lines here
+################################################
 VALID_ROUTES = {
     "1","2","3","4","5","6","6X","7","7X","S","GS",
     "A","C","E","SR","G","N","Q","R","W","B","D","F","M","SF","J","Z","L","SI"
 }
 
-
+################################################
 # MAIN FETCH LOGIC: For each of the 8 feeds
+################################################
 def fetch_all_feeds():
-    global last_fetched_trips  # so we can store them in that global
-    all_trips = []  # accumulate everything from all feeds
+    global last_fetched_trips
+    all_trips = []
 
-    for feed_url in MTA_FEEDS:  # loop over each feed
+    for feed_url in MTA_FEEDS:
         try:
-            resp = requests.get(feed_url, headers=HEADERS, timeout=10)  # call MTA feed
-            if resp.status_code != 200:  # if not success
+            resp = requests.get(feed_url, headers=HEADERS, timeout=10)
+            if resp.status_code != 200:
                 print(f"[ERROR] Feed {feed_url} returned {resp.status_code}")
                 continue
 
-            raw = resp.content  # get raw bytes
-            feed = gtfs_realtime_pb2.FeedMessage()  # create a FeedMessage object
-            feed.ParseFromString(raw)  # parse the protobuf from raw bytes
+            raw = resp.content
+            feed = gtfs_realtime_pb2.FeedMessage()
+            feed.ParseFromString(raw)
 
-            for entity in feed.entity:  # loop each entity in the feed
+            for entity in feed.entity:
                 if not entity.trip_update and not entity.vehicle:
-                    continue  # skip if no trip_update or vehicle data
+                    continue
 
                 trip_id = ""
                 route_id = ""
                 current_stop_id = ""
                 next_stop_id = ""   # We no longer parse upcoming stops
 
-                if entity.trip_update:  # if there's trip_update info
+                if entity.trip_update:
                     trip_id = entity.trip_update.trip.trip_id
                     route_id = entity.trip_update.trip.route_id
 
-                if entity.vehicle:  # if there's vehicle data
+                if entity.vehicle:
                     veh = entity.vehicle
                     if not trip_id:
                         trip_id = veh.trip.trip_id
@@ -142,13 +155,12 @@ def fetch_all_feeds():
                         current_stop_id = veh.stop_id
 
                 if not route_id:
-                    continue  # skip if no route
-
+                    continue
                 # Filter only if route is recognized
                 if route_id not in VALID_ROUTES:
                     continue
 
-                direction = parse_direction(trip_id)  # figure out N or S
+                direction = parse_direction(trip_id)
 
                 rec = {
                     "trip_id": trip_id,
@@ -158,34 +170,35 @@ def fetch_all_feeds():
                     "direction": direction,
                     "timestamp": int(datetime.now(timezone.utc).timestamp())
                 }
-                all_trips.append(rec)  # store that in our big list
-        except Exception as e:  # handle exceptions
+                all_trips.append(rec)
+        except Exception as e:
             print(f"[ERROR] Could not fetch/parse feed {feed_url}: {e}")
             continue
 
     # Produce everything to Redpanda
     for td in all_trips:
-        producer.send(TOPIC_NAME, value=td)  # send each rec to the topic
-    producer.flush()  # make sure they get delivered
+        producer.send(TOPIC_NAME, value=td)
+    producer.flush()
 
-    last_fetched_trips = all_trips  # store in global
-    print(f"[INFO] Produced {len(all_trips)} trip updates total at {datetime.now()}")  # log
+    last_fetched_trips = all_trips
+    print(f"[INFO] Produced {len(all_trips)} trip updates total at {datetime.now()}")
 
 def schedule_fetch():
-    schedule.every(FETCH_INTERVAL_SECONDS).seconds.do(fetch_all_feeds)  # run fetch_all_feeds every 5s
+    schedule.every(FETCH_INTERVAL_SECONDS).seconds.do(fetch_all_feeds)
     while True:
-        schedule.run_pending()  # do scheduled tasks
-        time.sleep(1)  # short sleep
+        schedule.run_pending()
+        time.sleep(1)
 
-
+################################################
 # FLASK ROUTES
+################################################
 @app.route("/latest-trips")
 def latest_trips():
-    return jsonify(last_fetched_trips), 200  # return the last fetched trips as JSON
+    return jsonify(last_fetched_trips), 200
 
 @app.route("/stations")
 def get_stations():
-    return jsonify(station_data), 200  # serve up station data as JSON if loaded
+    return jsonify(station_data), 200
 
 @app.route("/train-stream")
 def train_stream():
@@ -198,17 +211,20 @@ def train_stream():
         consumer = KafkaConsumer(
             TOPIC_NAME,
             bootstrap_servers=BOOTSTRAP_SERVERS,
+            security_protocol="SASL_SSL",
+            sasl_mechanism="SCRAM-SHA-256",
+            sasl_plain_username="bturcotte",
+            sasl_plain_password="9989",
             auto_offset_reset="latest",
             enable_auto_commit=False,
             group_id=f"mta-group-{uuid.uuid4()}",
             value_deserializer=lambda m: json.loads(m.decode("utf-8"))
         )
-        for msg in consumer:  # forever read messages
-            yield f"data: {json.dumps(msg.value)}\n\n"  # SSE format
-
-    return Response(event_stream(), mimetype="text/event-stream")  # return SSE response
+        for msg in consumer:
+            yield f"data: {json.dumps(msg.value)}\n\n"
+    return Response(event_stream(), mimetype="text/event-stream")
 
 if __name__ == "__main__":
-    load_station_data()  # load stations if CSV is present
-    threading.Thread(target=schedule_fetch, daemon=True).start()  # start the scheduler in a background thread
-    app.run(port=8000, debug=True)  # run Flask on port 8000, with debug
+    load_station_data()
+    threading.Thread(target=schedule_fetch, daemon=True).start()
+    app.run(port=8000, debug=True)
