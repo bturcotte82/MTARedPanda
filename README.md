@@ -49,33 +49,9 @@ In short:
 
 Below is a simplified diagram of our architecture. (Yes, it's simplified, because MTA's GTFS feeds are already complicated enough.)
 
-sql
+<img width="838" alt="Screenshot 2025-03-14 at 1 31 47 AM" src="https://github.com/user-attachments/assets/7546394d-b6ec-4b95-90bc-b14d2277a322" />
 
-Copy
 
-+------------------+      Produce       +------------------+
-
- |  MTA GTFS Feeds  |  1)  ----------->  |  Redpanda Topic  |
-
- | (8 Endpoints)    |                   |   "mta-feed"      |
-
- +------------------+                   +-------------------+
-
-              |                                     |
-
-              |                                     |
-
-    2) Fetch & Parse                           3) Consume
-
-              |                                     |
-
-       +---------------+         SSE        +------------------+
-
-       | Flask Backend |  <---------------  |  React Frontend  |
-
-       | (app.py)      |  4) event-stream   |  (Leaflet Map)   |
-
-       +---------------+                   +------------------+
 
 1.  We pull train updates from eight separate MTA GTFS endpoints.
 
