@@ -1,50 +1,60 @@
-import React, { useState, useEffect } from 'react'; // import React, plus some hooks
-import EventSource from 'react-native-sse'; // SSE library for iOS/Android but also works in web env
-import { MapContainer, TileLayer } from 'react-leaflet'; // Leaflet components
-import 'leaflet/dist/leaflet.css'; // Leaflet default styles
-import './App.css'; // our custom styles
+// src/App.js
+import React, { useState, useEffect } from 'react';            // standard React hooks
+import EventSource from 'react-native-sse';                    // SSE client for React Native
+import { MapContainer, TileLayer } from 'react-leaflet';       // Leaflet map components
+import 'leaflet/dist/leaflet.css';                             // default Leaflet CSS
+import './App.css';                                            // our app's custom CSS
 
-import TrainMarkers from './TrainMarkers'; // component that shows the moving train markers
-import TrainSchedulePanel from './TrainSchedulePanel'; // component that shows the route-based list
+import TrainMarkers from './TrainMarkers';                     // custom component for train pins
+import TrainSchedulePanel from './TrainSchedulePanel';          // custom panel for train schedule listing
 
-function App() { // our main React component
-  const [stationData, setStationData] = useState({}); // hold all station info from backend
-  const [tripMap, setTripMap] = useState({}); // store events keyed by trip_id
-  const [isConnected, setIsConnected] = useState(false); // track if SSE is open
+function App() {
+  const [stationData, setStationData] = useState({});          // holds station info
+  const [tripMap, setTripMap] = useState({});                  // object storing current trips
+  const [isConnected, setIsConnected] = useState(false);       // SSE connection status
 
-  const [rawMessages, setRawMessages] = useState([]); // keep last 5 raw SSE lines
-  const [showRawFeed, setShowRawFeed] = useState(false); // toggle for the debug feed panel
+  // New: track last 5 raw SSE messages
+  const [rawMessages, setRawMessages] = useState([]);
+  // Toggle for the “Raw Feed” box
+  const [showRawFeed, setShowRawFeed] = useState(false);
 
-  // 1) Load station data
-  useEffect(() => { // run once on mount
-    fetch("http://localhost:8000/stations") // call backend route
-      .then(res => res.json()) // parse response as JSON
+  // 1) Load station data from backend
+  useEffect(() => {
+    fetch("http://localhost:8000/stations")
+      .then(res => res.json())
       .then(data => {
-        setStationData(data); // store station data
+        setStationData(data);
         console.log("Loaded station data with", Object.keys(data).length, "entries");
       })
       .catch(err => console.error("Failed to load station data:", err));
-  }, []); // empty deps => runs once
+  }, []);
+  // ^ runs once on mount, fetches station data from backend
 
-  // 2) Connect SSE
-  useEffect(() => { // set up SSE on mount
-    const sse = new EventSource("http://localhost:8000/train-stream"); // connect to server SSE route
-    sse.addEventListener("open", () => { // when SSE opens
-      setIsConnected(true); // mark connected
+  // 2) Connect SSE for real-time train updates
+  useEffect(() => {
+    const sse = new EventSource("http://localhost:8000/train-stream");
+    // connect to that SSE endpoint
+
+    sse.addEventListener("open", () => {
+      setIsConnected(true);
       console.log("SSE connected");
     });
-    sse.addEventListener("message", (e) => { // every time we get a new event
-      try {
-        const dataStr = e.data; // raw string from SSE
-        const evt = JSON.parse(dataStr); // parse to object
+    // ^ triggers when SSE is up
 
-        // store the raw message in "rawMessages", only keep 5
+    sse.addEventListener("message", (e) => {
+      // each new SSE message is an MTA trip update
+      try {
+        const dataStr = e.data;      // raw JSON string
+        const evt = JSON.parse(dataStr);
+        // parse the JSON so we can use it
+
+        // Update rawMessages (keep only last 5 messages)
         setRawMessages(prev => {
           const next = [dataStr, ...prev];
-          return next.slice(0, 5); // limit to 5 items
+          return next.slice(0, 5);
         });
 
-        // if it has a trip_id, we add/merge into tripMap
+        // If the msg has a trip_id, store it in our tripMap
         if (evt.trip_id) {
           setTripMap(prev => {
             const copy = { ...prev };
@@ -52,64 +62,72 @@ function App() { // our main React component
               ...copy[evt.trip_id],
               ...evt
             };
-            return copy; // return updated map
+            return copy;
           });
         }
       } catch (err) {
         console.error("SSE parse error:", err);
       }
     });
-    sse.addEventListener("error", () => { // if SSE hits an error
-      setIsConnected(false); // mark disconnected
+
+    sse.addEventListener("error", () => {
+      setIsConnected(false);
       console.log("SSE error");
     });
 
-    return () => sse.close(); // cleanup on unmount
-  }, []); // empty deps => runs once
+    // cleanup if component unmounts
+    return () => sse.close();
+  }, []);
 
-  const tripsArray = Object.values(tripMap); // convert map to array for easier iteration
+  // Convert tripMap object to an array for easier iteration
+  const tripsArray = Object.values(tripMap);
 
-  const handleToggleRawFeed = () => { // toggles the raw SSE feed panel
+  // toggles our “Raw Feed” box
+  const handleToggleRawFeed = () => {
     setShowRawFeed(prev => !prev);
   };
 
   return (
-    <div className="App"> {/* main wrapper */}
+    <div className="App">
       <header>
         <h1>NYC Subway Tracker</h1>
-        <div className="status-bar"> {/* container for status + button */}
+        <div className="status-bar">
           <div className="connection-status">
-            Redpanda: {isConnected ? "Connected ✅" : "Disconnected ❌"} {/* SSE state */}
+            Redpanda: {isConnected ? "Connected ✅" : "Disconnected ❌"}
           </div>
-          <button className="info-btn" onClick={handleToggleRawFeed}>+</button> {/* toggle debug feed */}
+          {/* “?” (plus) button to toggle raw feed panel */}
+          <button className="info-btn" onClick={handleToggleRawFeed}>+</button>
         </div>
       </header>
 
-      {/* show raw feed if user toggles */}
+      {/* The small raw feed panel, only if showRawFeed is true */}
       {showRawFeed && (
         <div className="raw-feed-box">
           <h4> topic consume mta-feed (last 5 msgs)</h4>
           <div className="feed-lines">
             {rawMessages.map((msg, idx) => (
-              <div key={idx} className="feed-line">{msg}</div> // each raw JSON line
+              <div key={idx} className="feed-line">{msg}</div>
             ))}
           </div>
         </div>
       )}
 
-      <div className="map-container"> {/* container for leaflet map */}
+      <div className="map-container">
+        {/* Leaflet map centered on Manhattan-ish coords */}
         <MapContainer center={[40.75, -73.99]} zoom={12} style={{ height: "600px", width: "100%" }}>
           <TileLayer
             attribution='&copy; <a href="https://osm.org/copyright">OpenStreetMap</a>'
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
-          <TrainMarkers tripsArray={tripsArray} stationData={stationData} /> {/* all trains */}
+          <TrainMarkers tripsArray={tripsArray} stationData={stationData} />
+          {/* Markers for trains rendered here */}
         </MapContainer>
       </div>
 
-      <TrainSchedulePanel tripsArray={tripsArray} stationData={stationData} /> {/* route-based listing */}
+      <TrainSchedulePanel tripsArray={tripsArray} stationData={stationData} />
+      {/* Panel listing trains by route */}
     </div>
   );
 }
 
-export default App; // export the main component
+export default App;
