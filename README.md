@@ -1,7 +1,10 @@
 1\. Introduction
 ----------------
+![subway GIF](https://github.com/user-attachments/assets/a2ad2d1e-72ad-4db3-8b86-72825fa31e67)
 
-You've probably heard a million times that Redpanda is this "Kafka API-compatible" streaming engine that's faster, simpler, and doesn't require a dedicated team just to keep it from crashing. But if you've ever tried to set up a new streaming project in Kafka, you know the hassle: ZooKeeper. Tuning a small galaxy of server.properties. Figuring out broker counts and hoping half your cluster doesn't spontaneously combust.
+
+
+You may have heard that Redpanda is a "Kafka API-compatible" streaming engine that's faster, simpler, and doesn't require a dedicated team just to keep it from crashing. But if you've ever tried to set up a new streaming project in Kafka, you know the hassle: ZooKeeper. Tuning a small galaxy of server.properties. Figuring out broker counts and hoping half your cluster doesn't spontaneously combust.
 
 Redpanda promises 10x lower latencies, 3-6x cost efficiency, and at least 3x fewer brokers needed to get the same throughput. That's nice in theory, but what does it look like when you actually build an app? Enter this NYC Subway Real-Time Tracker, a somewhat masochistic attempt to watch trains in real time.
 
