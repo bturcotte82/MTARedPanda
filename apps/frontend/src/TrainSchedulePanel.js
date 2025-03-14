@@ -1,7 +1,8 @@
-import React, { useState } from 'react'; // pull in React and useState hook
+// src/TrainSchedulePanel.js
+import React, { useState } from 'react';
 
 function formatTime(ts) {
-  // function to format Unix seconds -> short local date/time
+  // helper to convert UNIX time to short date/time
   if (!ts) return "";
   const d = new Date(ts * 1000);
   return d.toLocaleString([], {
@@ -11,14 +12,14 @@ function formatTime(ts) {
 }
 
 function getStationName(stopId, stationData) {
-  // tries to get station name from our dictionary
+  // looks up station name by ID
   if (!stopId) return "";
   const st = stationData[stopId];
   return st ? st.name : stopId;
 }
 
 function getRouteColor(route) {
-  // basic color map for each route ID
+  // returns a color for each route line
   const colorMap = {
     "1": "#EE352E",
     "2": "#EE352E",
@@ -57,33 +58,34 @@ function getRouteColor(route) {
 
     "SI": "#A7A9AC"
   };
-  return colorMap[route] || "#333333"; // default if not found
+  return colorMap[route] || "#333333";
 }
 
 export default function TrainSchedulePanel({ tripsArray, stationData }) {
-  // grouping trains by route
-  const routeMap = {}; // route -> array of trains
+  // We'll group trains by route
+  const routeMap = {};
   tripsArray.forEach(trip => {
-    const r = trip.route_id || "??"; // fallback label if no route
+    const r = trip.route_id || "??";
     if (!routeMap[r]) routeMap[r] = [];
     routeMap[r].push(trip);
   });
 
-  const [expanded, setExpanded] = useState({}); // track which routes are open
+  // keep track of which routes are "expanded"
+  const [expanded, setExpanded] = useState({});
   const toggle = (r) => {
-    // flip open/closed for a route
     setExpanded(prev => ({ ...prev, [r]: !prev[r] }));
   };
 
-  const sortedRoutes = Object.keys(routeMap).sort(); // sort route IDs for stable order
+  // sort route keys so they appear in alphabetical order
+  const sortedRoutes = Object.keys(routeMap).sort();
 
   return (
     <div className="schedule-panel">
       <h2>Train Schedules</h2>
       {sortedRoutes.map(route => {
-        const color = getRouteColor(route); // pick a color for that route
-        const trains = routeMap[route]; // all trains for this route
-        const isOpen = expanded[route] || false; // is it expanded?
+        const color = getRouteColor(route);
+        const trains = routeMap[route];
+        const isOpen = expanded[route] || false;
 
         return (
           <div
@@ -122,12 +124,12 @@ export default function TrainSchedulePanel({ tripsArray, stationData }) {
 }
 
 function TripItem({ trip, stationData }) {
-  // single train item
+  // a small sub-component to display a single trip
   const stationName = getStationName(trip.current_stop_id, stationData);
   const nextName = trip.next_stop_id ? getStationName(trip.next_stop_id, stationData) : "";
   const timeStr = formatTime(trip.timestamp);
 
-  // "At/Heading to" line if we have a station
+  // "At/Heading to"
   let atHeadingLine = null;
   if (stationName) {
     atHeadingLine = (
@@ -137,7 +139,7 @@ function TripItem({ trip, stationData }) {
     );
   }
 
-  // only show next stop if next_stop_id exists
+  // Next stop only if next_stop_id is not empty
   const nextStopLine = trip.next_stop_id
     ? (
       <div>
