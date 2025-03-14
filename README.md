@@ -116,7 +116,8 @@ producer = KafkaProducer(
 
     value_serializer=lambda v: json.dumps(v).encode("utf-8")
 
-) ```
+)
+```
 
 Observations:
 
@@ -132,7 +133,8 @@ We're pulling from eight different MTA endpoints to cover basically all NYC subw
 
 Key logic (Python):
 
-``` def fetch_all_feeds():
+```
+ def fetch_all_feeds():
 
     global last_fetched_trips
 
@@ -178,7 +180,8 @@ Key logic (Python):
 
     last_fetched_trips = all_trips
 
-    print(f"[INFO] Produced {len(all_trips)} trip updates total") ```
+    print(f"[INFO] Produced {len(all_trips)} trip updates total")
+```
 
 
 We schedule this function to run every few seconds using the schedule library. This ensures near real-time updates. Because MTA data can update frequently, we want a constant flow into Redpanda.
