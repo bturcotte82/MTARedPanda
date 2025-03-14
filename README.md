@@ -98,7 +98,7 @@ The backend is a simple Flask app. We rely on flask_cors for CORS handling (so o
 
 Key config snippet (Python):
 
-''' BOOTSTRAP_SERVERS = "cv7j8ci9anc1h5oh9sa0.any.us-east-1.mpx.prd.cloud.redpanda.com:9092"
+``` BOOTSTRAP_SERVERS = "cv7j8ci9anc1h5oh9sa0.any.us-east-1.mpx.prd.cloud.redpanda.com:9092"
 
 TOPIC_NAME = "mta-feed"
 
@@ -116,7 +116,7 @@ producer = KafkaProducer(
 
     value_serializer=lambda v: json.dumps(v).encode("utf-8")
 
-) '''
+) ```
 
 Observations:
 
@@ -132,7 +132,7 @@ We're pulling from eight different MTA endpoints to cover basically all NYC subw
 
 Key logic (Python):
 
-''' def fetch_all_feeds():
+``` def fetch_all_feeds():
 
     global last_fetched_trips
 
@@ -178,7 +178,7 @@ Key logic (Python):
 
     last_fetched_trips = all_trips
 
-    print(f"[INFO] Produced {len(all_trips)} trip updates total") '''
+    print(f"[INFO] Produced {len(all_trips)} trip updates total") ```
 
 
 We schedule this function to run every few seconds using the schedule library. This ensures near real-time updates. Because MTA data can update frequently, we want a constant flow into Redpanda.
@@ -187,7 +187,7 @@ We schedule this function to run every few seconds using the schedule library. T
 
 As shown above, each trip record is just a Python dictionary:
 
-'''
+```
 
 {
 
@@ -205,12 +205,12 @@ As shown above, each trip record is just a Python dictionary:
 
 }
 
-'''
+```
 
 We produce that dictionary directly with:
 
 
-''' producer.send(TOPIC_NAME, value=td) '''
+``` producer.send(TOPIC_NAME, value=td) ```
 
 Thanks to our value_serializer, it's automatically JSON-encoded and published. Notice we don't have any separate "schema registry," nor do we jump through Avro hoops here. We're keeping it straightforward. If you need or prefer Avro (or Protobuf, ironically), you can do that too.
 
@@ -218,7 +218,7 @@ Thanks to our value_serializer, it's automatically JSON-encoded and published. N
 
 We also have a neat Flask endpoint /train-stream that uses a server-sent events (SSE) approach. On each client request, we spin up a new KafkaConsumer with a random group ID:
 
-'''
+```
 
 consumer = KafkaConsumer(
 
@@ -237,17 +237,17 @@ consumer = KafkaConsumer(
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
 
 )
-'''
+```
 
 Then we:
 
-'''
+```
 
 for msg in consumer:
 
     yield f"data: {json.dumps(msg.value)}\n\n"
 
-'''
+```
 
 That's SSE in a nutshell: we yield each message with the data: prefix, and the front end is set up to handle message events. This is simpler than messing with WebSockets or some heavier real-time library. If SSE is "so 2015," it's because it works great for 95% of these streaming UI scenarios.
 
@@ -258,7 +258,7 @@ So each new connection starts reading from the "latest" offset. If we used one f
 
 We also have a small stations.csv that we load to map stop_id -> station name, lat, lon. This is optional but nice for giving us more user-friendly station names rather than cryptic IDs. The CSV is in the format:
 
-'''
+```
 
 stop_id,stop_name,stop_lat,stop_lon
 
@@ -276,7 +276,7 @@ def load_station_data():
 
     # Read stations.csv, store in a dict station_data[stop_id] = {...}
 
-'''
+```
 
 We can then look up station details in the front end or back end as needed.
 
@@ -305,7 +305,7 @@ On the React side:
 
 In App.js, we do this:
 
-'''
+```
 
 useEffect(() => {
 
@@ -345,7 +345,7 @@ useEffect(() => {
 
 }, []);
 
-'''
+```
 
 This is the entire real-time connection logic on the front end. No custom library, no special subscription logic. SSE is just a standard browser feature. The big advantage is that it's an easy one-liner on the server (yield messages) and an easy setup on the client (EventSource).
 
@@ -357,7 +357,7 @@ We then pass the aggregated list of trips (tripMap) to our map. We rely on Leafl
 
 Here's the logic that actually positions the markers:
 
-'''
+```
 
 function computeTargetPos(trip, stationData, oldPos) {
 
@@ -381,7 +381,7 @@ function computeTargetPos(trip, stationData, oldPos) {
 
 }
 
-'''
+```
 
 Then we do a slight interpolation over time (setInterval with a small factor) to show a slow "movement" effect between the old position and the new target. It's not physically accurate, but it looks cooler than having them teleport from station to station.
 
@@ -485,7 +485,7 @@ Happy coding, and good luck tracking those trains!
 
 Backend
 
-'''
+```
 from flask import Flask, Response, jsonify
 
 from kafka import KafkaProducer, KafkaConsumer
@@ -509,12 +509,12 @@ producer = KafkaProducer(
     value_serializer=lambda v: json.dumps(v).encode("utf-8")
 
 )
-''' 
+``` 
 1.
 
 Fetching and Producing
 
-''' 
+``` 
 def fetch_all_feeds():
 
     trips = []
@@ -543,11 +543,11 @@ def fetch_all_feeds():
 
     producer.flush()
 
-'''
+```
 
 Consumer + SSE\
 
-'''
+```
 
 @app.route("/train-stream")
 
@@ -573,9 +573,9 @@ def train_stream():
 
     return Response(event_stream(), mimetype="text/event-stream")
 
-'''
+```
 
-'''
+```
 useEffect(() => {
 
   const sse = new EventSource("http://localhost:8000/train-stream");
@@ -591,11 +591,11 @@ useEffect(() => {
   return () => sse.close();
 
 }, []);
-'''
+```
 
 Leaflet Markers
 
-'''
+```
 function TrainMarkers({ tripsArray, stationData }) {
 
   // ...
@@ -632,7 +632,7 @@ function TrainMarkers({ tripsArray, stationData }) {
 
 }
 
-'''
+```
 
 * * * * *
 
